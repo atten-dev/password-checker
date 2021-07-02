@@ -1,14 +1,16 @@
 use std::io::{self, BufRead, BufReader, Write, BufWriter, Seek, SeekFrom};
-use std::convert::TryFrom;
 use std::fs::File;
 use std::collections::BTreeMap;
 use sha1::{Sha1, Digest};
-use hex::FromHex;
+use std::fs;
 use clap::{Arg, App};
+use num_bigint::{BigInt, ToBigInt};
+use num_traits::Num;
+
 
 struct PasswordChecker
 {
-    hash_pos_map: BTreeMap<String, u64>,
+    hash_pos_map: BTreeMap<BigInt, u64>,
     hash_path: String
 }
 
@@ -19,7 +21,7 @@ impl PasswordChecker
     }
 
     fn store_hash(&mut self, hash: &str, pos: u64) {
-        self.hash_pos_map.insert(hash.to_string(), pos);
+        self.hash_pos_map.insert(<BigInt as Num>::from_str_radix(hash, 16).unwrap(), pos);
     }
 
     fn load_index(&mut self, path: &str) -> io::Result<()> {
@@ -34,7 +36,7 @@ impl PasswordChecker
             let pos = vec[1].parse::<u64>().unwrap();
             self.store_hash(hash, pos);
             counter+=1;
-            if counter % 1000 == 0 {
+            if counter % 10000 == 0 {
                 println!("Loaded {} hashes so far", counter);
             }
         }
@@ -43,7 +45,7 @@ impl PasswordChecker
     }
 
     fn get_file_pos(&self, pw_hash: &str) -> u64 {
-        match self.hash_pos_map.range(pw_hash.to_string()..).next() {
+        match self.hash_pos_map.range(..<BigInt as Num>::from_str_radix(pw_hash, 16).unwrap()).next_back() {
             Some(kv) => *kv.1,
             None => 0
         }
@@ -51,6 +53,7 @@ impl PasswordChecker
 
     fn check_hash_exists(&self, pw_hash: &str) -> u64 {
         let pos = self.get_file_pos(pw_hash);
+        println!("Got pos {} for {}", pos, pw_hash);
         let f = File::open(&self.hash_path).expect("Failed to open hash file");
         let mut f = BufReader::new(f);
         f.seek(SeekFrom::Start(pos)).expect("Failed to seek");
@@ -178,95 +181,126 @@ mod tests {
 
     #[test]
     fn store_hash() {
-        let mut pc = PasswordChecker::new("");
-        pc.store_hash("0", 1);
+        let mut pc = PasswordChecker::new("test_hashes.txt");
+        pc.store_hash("0", 0);
         assert_eq!(1, pc.check_hash_exists("0"));
     }
 
     #[test]
-    fn store_hash_two_char() {
-        let mut trie = Trie::new();
-        trie.store_hash("21");
-        assert!(trie.root.children.get(&2u8).as_ref().unwrap().children.get(&1u8).is_some());
+    fn load_index() {
+        let index_path = "/tmp/index.txt";
+        create_index("test_hashes.txt", index_path).expect("Failed to create index");
+        let mut pc = PasswordChecker::new("test_hashes.txt");
+        
+        pc.load_index(index_path).expect("Failed to load test vector");
+        assert_eq!(9001, pc.check_password_exists("password"));
+        assert_eq!(0, pc.check_password_exists("Password"));
+        assert_eq!(1111, pc.check_password_exists("abc123"));
     }
 
     #[test]
-    fn store_hash_two_hashes() {
-        let mut trie = Trie::new();
-        trie.store_hash("21");
-        trie.store_hash("12");
-        assert!(trie.root.children.get(&1u8).as_ref().unwrap().children.get(&2u8).is_some());
-        assert!(trie.root.children.get(&2u8).as_ref().unwrap().children.get(&1u8).is_some());
+    fn boundary_cases() {
+        let hash_path = "/tmp/hash.txt";
+        let mut data = String::from("");
+        for i in 0..1003 {
+            data.push_str(&format!("{:X}:{}\n",i,i+1));
+        }
+        fs::write(hash_path, data).expect("Unable to write test hash file");
+
+        let index_path = "/tmp/index.txt";
+        create_index(hash_path, index_path).expect("Failed to create index");
+        let mut pc = PasswordChecker::new(hash_path);
+        
+        pc.load_index(index_path).expect("Failed to load test vector");
+
+        for (key, value) in &pc.hash_pos_map {
+            println!("{}:{}", key, value);
+        }
+        assert_eq!(1, pc.check_hash_exists("0"));
+        assert_eq!(2, pc.check_hash_exists("1"));
+        assert_eq!(102, pc.check_hash_exists(&format!("{:X}", 101)));
+        assert_eq!(1002, pc.check_hash_exists(&format!("{:X}", 1001)));
+        assert_eq!(1003, pc.check_hash_exists(&format!("{:X}", 1002)));
     }
 
-    #[test]
-    fn store_hash_full_hash() {
-        let mut trie = Trie::new();
-        trie.store_hash("5BAA61E4C9B93F3F0682250B6CF8331B7EE68FD8");
-        assert!(trie.root.children.get(&5u8).as_ref().unwrap().
-                          children.get(&11u8).as_ref().unwrap(). // B
-                          children.get(&10u8).as_ref().unwrap(). // A
-                          children.get(&10u8).as_ref().unwrap(). // A
-                          children.get(&6u8).as_ref().unwrap().
-                          children.get(&1u8).as_ref().unwrap().
-                          children.get(&14u8).as_ref().unwrap(). // E
-                          children.get(&4u8).as_ref().unwrap().
-                          children.get(&12u8).as_ref().unwrap(). // C
-                          children.get(&9u8).as_ref().unwrap().
-                          children.get(&11u8).as_ref().unwrap(). // B
-                          children.get(&9u8).as_ref().unwrap().
-                          children.get(&3u8).as_ref().unwrap().
-                          children.get(&15u8).as_ref().unwrap(). // F
-                          children.get(&3u8).as_ref().unwrap().
-                          children.get(&15u8).as_ref().unwrap(). // F
-                          children.get(&0u8).as_ref().unwrap().
-                          children.get(&6u8).as_ref().unwrap().
-                          children.get(&8u8).as_ref().unwrap().
-                          children.get(&2u8).as_ref().unwrap().
-                          children.get(&2u8).as_ref().unwrap().
-                          children.get(&5u8).as_ref().unwrap().
-                          children.get(&0u8).as_ref().unwrap().
-                          children.get(&11u8).as_ref().unwrap(). // B
-                          children.get(&6u8).as_ref().unwrap().
-                          children.get(&12u8).as_ref().unwrap(). // C
-                          children.get(&15u8).as_ref().unwrap(). // F
-                          children.get(&8u8).as_ref().unwrap().
-                          children.get(&3u8).as_ref().unwrap().
-                          children.get(&3u8).as_ref().unwrap().
-                          children.get(&1u8).as_ref().unwrap().
-                          children.get(&11u8).as_ref().unwrap(). // B
-                          children.get(&7u8).as_ref().unwrap().
-                          children.get(&14u8).as_ref().unwrap(). // E
-                          children.get(&14u8).as_ref().unwrap(). // E
-                          children.get(&6u8).as_ref().unwrap().
-                          children.get(&8u8).as_ref().unwrap().
-                          children.get(&15u8).as_ref().unwrap(). // F
-                          children.get(&13u8).as_ref().unwrap(). // D
-                          children.get(&8u8).is_some());
-    }   
+    // #[test]
+    // fn store_hash_two_char() {
+    //     let mut trie = Trie::new();
+    //     trie.store_hash("21");
+    //     assert!(trie.root.children.get(&2u8).as_ref().unwrap().children.get(&1u8).is_some());
+    // }
 
-    #[test]
-    fn check_hash_exists() {
-        let mut trie = Trie::new();
-        trie.store_hash("21");
-        assert!(trie.check_hash_exists("21"));
-        assert!(!trie.check_hash_exists("12"));
-    }
+    // #[test]
+    // fn store_hash_two_hashes() {
+    //     let mut trie = Trie::new();
+    //     trie.store_hash("21");
+    //     trie.store_hash("12");
+    //     assert!(trie.root.children.get(&1u8).as_ref().unwrap().children.get(&2u8).is_some());
+    //     assert!(trie.root.children.get(&2u8).as_ref().unwrap().children.get(&1u8).is_some());
+    // }
 
-    #[test]
-    fn check_password_exists() {
-        let mut trie = Trie::new();
-        trie.store_hash("5BAA61E4C9B93F3F0682250B6CF8331B7EE68FD8");
-        assert!(trie.check_password_exists("password"));
-        assert!(!trie.check_password_exists("Password"));
-    }
+    // #[test]
+    // fn store_hash_full_hash() {
+    //     let mut trie = Trie::new();
+    //     trie.store_hash("5BAA61E4C9B93F3F0682250B6CF8331B7EE68FD8");
+    //     assert!(trie.root.children.get(&5u8).as_ref().unwrap().
+    //                       children.get(&11u8).as_ref().unwrap(). // B
+    //                       children.get(&10u8).as_ref().unwrap(). // A
+    //                       children.get(&10u8).as_ref().unwrap(). // A
+    //                       children.get(&6u8).as_ref().unwrap().
+    //                       children.get(&1u8).as_ref().unwrap().
+    //                       children.get(&14u8).as_ref().unwrap(). // E
+    //                       children.get(&4u8).as_ref().unwrap().
+    //                       children.get(&12u8).as_ref().unwrap(). // C
+    //                       children.get(&9u8).as_ref().unwrap().
+    //                       children.get(&11u8).as_ref().unwrap(). // B
+    //                       children.get(&9u8).as_ref().unwrap().
+    //                       children.get(&3u8).as_ref().unwrap().
+    //                       children.get(&15u8).as_ref().unwrap(). // F
+    //                       children.get(&3u8).as_ref().unwrap().
+    //                       children.get(&15u8).as_ref().unwrap(). // F
+    //                       children.get(&0u8).as_ref().unwrap().
+    //                       children.get(&6u8).as_ref().unwrap().
+    //                       children.get(&8u8).as_ref().unwrap().
+    //                       children.get(&2u8).as_ref().unwrap().
+    //                       children.get(&2u8).as_ref().unwrap().
+    //                       children.get(&5u8).as_ref().unwrap().
+    //                       children.get(&0u8).as_ref().unwrap().
+    //                       children.get(&11u8).as_ref().unwrap(). // B
+    //                       children.get(&6u8).as_ref().unwrap().
+    //                       children.get(&12u8).as_ref().unwrap(). // C
+    //                       children.get(&15u8).as_ref().unwrap(). // F
+    //                       children.get(&8u8).as_ref().unwrap().
+    //                       children.get(&3u8).as_ref().unwrap().
+    //                       children.get(&3u8).as_ref().unwrap().
+    //                       children.get(&1u8).as_ref().unwrap().
+    //                       children.get(&11u8).as_ref().unwrap(). // B
+    //                       children.get(&7u8).as_ref().unwrap().
+    //                       children.get(&14u8).as_ref().unwrap(). // E
+    //                       children.get(&14u8).as_ref().unwrap(). // E
+    //                       children.get(&6u8).as_ref().unwrap().
+    //                       children.get(&8u8).as_ref().unwrap().
+    //                       children.get(&15u8).as_ref().unwrap(). // F
+    //                       children.get(&13u8).as_ref().unwrap(). // D
+    //                       children.get(&8u8).is_some());
+    // }   
 
-    #[test]
-    fn load_hashes() {
-        let mut trie = Trie::new();
-        trie.load_hashes("test_pws.txt").expect("Failed to load test vector");
-        assert!(trie.check_password_exists("password"));
-        assert!(!trie.check_password_exists("Password"));
-    }
+    // #[test]
+    // fn check_hash_exists() {
+    //     let mut trie = Trie::new();
+    //     trie.store_hash("21");
+    //     assert!(trie.check_hash_exists("21"));
+    //     assert!(!trie.check_hash_exists("12"));
+    // }
+
+    // #[test]
+    // fn check_password_exists() {
+    //     let mut trie = Trie::new();
+    //     trie.store_hash("5BAA61E4C9B93F3F0682250B6CF8331B7EE68FD8");
+    //     assert!(trie.check_password_exists("password"));
+    //     assert!(!trie.check_password_exists("Password"));
+    // }
+
+
 
 }
