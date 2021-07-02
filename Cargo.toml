@@ -7,3 +7,5 @@ edition = "2018"
 
 [dependencies]
 sha-1 = "0.9"
+generic-array = "0.14"
+hex = "0.4"

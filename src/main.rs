@@ -5,6 +5,8 @@ use std::fs::File;
 use std::env;
 use std::collections::HashMap;
 use sha1::{Sha1, Digest};
+use generic_array::{ArrayLength, GenericArray};
+use hex::FromHex;
 
 struct TrieNode {
     // children: [Option<Box<TrieNode>>; 16]
@@ -25,13 +27,15 @@ impl TrieNode {
 
 struct Trie
 {
-    root: TrieNode 
+    root: TrieNode,
+    // hashes: Vec<GenericArray<u8,generic_array::typenum::U18>>
+    hashes: Vec<[u8; 20]>
 }
 
 impl Trie
 {
     fn new() -> Trie {
-        Trie { root: TrieNode::new() }
+        Trie { root: TrieNode::new(), hashes: Vec::with_capacity(1000000) }
     }
 
     fn store_hash_recursive(node: &mut TrieNode, pw_remainder: &str) {
@@ -50,9 +54,14 @@ impl Trie
         }
     }
 
-    fn store_hash(&mut self, pw: &str) {
-        let pw = pw.to_uppercase();
-        Trie::store_hash_recursive(&mut self.root, &pw);
+    fn store_hash_bin(&mut self, hash: [u8; 20]) { //GenericArray<u8, generic_array::typenum::U18>) {
+        self.hashes.push(hash);
+    }
+
+    fn store_hash(&mut self, hash: &str) {
+        if hash.len() < 2 { return; }
+        let bin_hash = <[u8; 20] as FromHex>::from_hex(hash).expect("Hex to binary conversion failed");
+        self.store_hash_bin(bin_hash);
     }
 
     fn load_hashes(&mut self, path: &str) -> io::Result<()> {
@@ -90,7 +99,8 @@ impl Trie
     }
 
     fn check_hash_exists(&self, pw_hash: &str) -> bool {
-        Trie::check_hash_recursive(&self.root, &pw_hash)
+        let bin_hash = <[u8; 20] as FromHex>::from_hex(pw_hash).expect("Hex to binary conversion failed");
+        self.hashes.contains(&bin_hash)
     }
 
     fn check_password_exists(&self, pw: &str) -> bool {
