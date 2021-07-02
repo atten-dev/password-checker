@@ -29,33 +29,26 @@ struct Trie
 {
     root: TrieNode,
     // hashes: Vec<GenericArray<u8,generic_array::typenum::U18>>
-    hashes: Vec<[u8; 20]>
+    // hashes: Vec<[u8; 20]>
 }
 
 impl Trie
 {
     fn new() -> Trie {
-        Trie { root: TrieNode::new(), hashes: Vec::with_capacity(1000000) }
+        Trie { root: TrieNode::new() }
     }
 
-    fn store_hash_recursive(node: &mut TrieNode, pw_remainder: &str) {
-        if let Some(first_char) = pw_remainder.chars().next() {
-            let child_idx = u8::try_from(first_char.to_digit(16).unwrap()).unwrap();
-
-            match node.children.contains_key(&child_idx) { 
-                false => {
-                    node.children.insert(child_idx, Box::new(TrieNode::new()));
-                }
-                true => {
-                    
-                }
+    fn store_hash_recursive(node: &mut TrieNode, hash_remainder: &[u8]) {
+        if let Some(first_byte) = hash_remainder.first() {
+            if !node.children.contains_key(&first_byte) { 
+                node.children.insert(*first_byte, Box::new(TrieNode::new()));
             }
-            Trie::store_hash_recursive(node.children.get_mut(&child_idx).unwrap().as_mut(), &pw_remainder[1..])
+            Trie::store_hash_recursive(node.children.get_mut(&first_byte).unwrap().as_mut(), &hash_remainder[1..])
         }
     }
 
     fn store_hash_bin(&mut self, hash: [u8; 20]) { //GenericArray<u8, generic_array::typenum::U18>) {
-        self.hashes.push(hash);
+        Trie::store_hash_recursive(&mut self.root, &hash)
     }
 
     fn store_hash(&mut self, hash: &str) {
@@ -80,17 +73,13 @@ impl Trie
         Ok(())
     }
 
-    fn check_hash_recursive(node: &TrieNode, pw_hash_remainder: &str) -> bool{
-        if let Some(first_char) = pw_hash_remainder.chars().next() {
-            let child_idx = u8::try_from(first_char.to_digit(16).unwrap()).unwrap();
-
-            match node.children.contains_key(&child_idx) { 
-                false => {
-                    return false
-                }
-                true => {
-                    return Trie::check_hash_recursive(node.children.get(&child_idx).unwrap(), &pw_hash_remainder[1..])
-                }
+    fn check_hash_recursive(node: &TrieNode, hash_remainder: &[u8]) -> bool{
+        if let Some(first_byte) = hash_remainder.first() {
+            if node.children.contains_key(&first_byte) { 
+                Trie::check_hash_recursive(node.children.get(&first_byte).unwrap(), &hash_remainder[1..])
+            }
+            else {
+                false 
             }
         }
         else {
@@ -100,7 +89,7 @@ impl Trie
 
     fn check_hash_exists(&self, pw_hash: &str) -> bool {
         let bin_hash = <[u8; 20] as FromHex>::from_hex(pw_hash).expect("Hex to binary conversion failed");
-        self.hashes.contains(&bin_hash)
+        Trie::check_hash_recursive(&self.root, &bin_hash)
     }
 
     fn check_password_exists(&self, pw: &str) -> bool {
