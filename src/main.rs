@@ -2,22 +2,25 @@ use std::io::{self, BufRead, BufReader, Write, BufWriter, Seek, SeekFrom};
 use std::fs::File;
 use std::collections::BTreeMap;
 use sha1::{Sha1, Digest};
-use std::fs;
 use clap::{Arg, App};
-use num_bigint::{BigInt, ToBigInt};
+use num_bigint::{BigInt};
 use num_traits::Num;
-
 
 struct PasswordChecker
 {
     hash_pos_map: BTreeMap<BigInt, u64>,
-    hash_path: String
+    hash_path: String,
+    index_block_size: u64
 }
 
 impl PasswordChecker
 {
-    fn new(hash_path: &str) -> PasswordChecker {
-        PasswordChecker { hash_pos_map: Default::default(), hash_path: hash_path.to_string() }
+    fn new(hash_path: &str, index_block_size: u64) -> PasswordChecker {
+        PasswordChecker {
+            hash_pos_map: Default::default(),
+            hash_path: hash_path.to_string(),
+            index_block_size: index_block_size
+        }
     }
 
     fn store_hash(&mut self, hash: &str, pos: u64) {
@@ -51,13 +54,12 @@ impl PasswordChecker
         }
     }
 
-    fn check_hash_exists(&self, pw_hash: &str) -> u64 {
+    fn check_hash_count(&self, pw_hash: &str) -> u64 {
         let pos = self.get_file_pos(pw_hash);
-        println!("Got pos {} for {}", pos, pw_hash);
         let f = File::open(&self.hash_path).expect("Failed to open hash file");
         let mut f = BufReader::new(f);
         f.seek(SeekFrom::Start(pos)).expect("Failed to seek");
-        for _ in 0..100 {
+        for _ in 0..self.index_block_size {
             let mut line = String::new(); 
             let res = f.read_line(&mut line);
             match res
@@ -73,22 +75,19 @@ impl PasswordChecker
                 }
                 Err(e) => { panic!("Failed to read line of hash file: {}", e); }
             }
-
         }
         0
     }
 
-    fn check_password_exists(&self, pw: &str) -> u64 {
+    fn check_password_count(&self, pw: &str) -> u64 {
         let mut hasher = Sha1::new();
         hasher.update(pw);
         let result = hasher.finalize();
-        println!("Hash is {:X}", result);
-        println!("Searching for your hash.");
-        return self.check_hash_exists(&format!("{:X}", result));
+        return self.check_hash_count(&format!("{:X}", result));
     }
 }
 
-fn create_index(hash_path: &str, index_path: &str) -> io::Result<()> {
+fn create_index(hash_path: &str, index_path: &str, index_block_size: u64) -> io::Result<()> {
     let mut f = BufReader::new(File::open(hash_path)?);
     let mut out_f = BufWriter::new(File::create(index_path)?);
 
@@ -99,7 +98,7 @@ fn create_index(hash_path: &str, index_path: &str) -> io::Result<()> {
         match f.read_line(&mut line) {
             Ok(0) => { break; } // Reprs EOF reached
             Ok(_) => {
-                if counter % 100 == 0 {
+                if counter % index_block_size == 0 {
                     let hash = line.split(":").next().unwrap();
                     let line_to_write = format!("{}:{}\n", hash, before_pos);
                     out_f.write_all(line_to_write.as_bytes())?
@@ -115,10 +114,6 @@ fn create_index(hash_path: &str, index_path: &str) -> io::Result<()> {
             println!("Indexed {} hashes", counter);
         }
     }
-    // Write the last line to the map to make searching easier
-    // let hash = line.split(":").next().unwrap();
-    // let line_to_write = format!("{}:{}\n", hash, f.stream_position()?);
-    // out_f.write_all(line_to_write.as_bytes())?;
     out_f.flush()?;
     Ok(())
 }
@@ -149,24 +144,26 @@ fn main() {
 
     let hash_path = matches.value_of("hash_file").unwrap();
     let index_path = matches.value_of("index_file").unwrap();
+    let index_block_size: u64 = 1000;
 
     match matches.is_present("create_index") {
         true => {
             println!("Creating index at {} from {}", index_path, hash_path);
-            create_index(hash_path, index_path).expect("Failed to create index");
+            create_index(hash_path, index_path, index_block_size).expect("Failed to create index");
         }
         false => {
             println!("Loading index file from {}", index_path);
-            let mut hash_trie = PasswordChecker::new(hash_path);
-            hash_trie.load_index(index_path).expect("Failed to open index file");
+            let mut pass_checker = PasswordChecker::new(hash_path, index_block_size);
+            pass_checker.load_index(index_path).expect("Failed to open index file");
             loop {
                 println!("Please enter the password you would like to check:");
                 let mut pw = String::new();
                 io::stdin().read_line(&mut pw).expect("Failed to read line");
                 let pw = pw.trim();
                 println!("You entered: {}", pw);
-                let pw_exists = hash_trie.check_password_exists(pw);
-                match pw_exists {
+                println!("Searching for your password.");
+                let pw_count = pass_checker.check_password_count(pw);
+                match pw_count {
                     0 => println!("Password is not in database"),
                     i => println!("Password is in database {} times", i)
                 }
@@ -181,21 +178,21 @@ mod tests {
 
     #[test]
     fn store_hash() {
-        let mut pc = PasswordChecker::new("test_hashes.txt");
+        let mut pc = PasswordChecker::new("test_hashes.txt",100);
         pc.store_hash("0", 0);
-        assert_eq!(1, pc.check_hash_exists("0"));
+        assert_eq!(1, pc.check_hash_count("0"));
     }
 
     #[test]
     fn load_index() {
         let index_path = "/tmp/index.txt";
-        create_index("test_hashes.txt", index_path).expect("Failed to create index");
-        let mut pc = PasswordChecker::new("test_hashes.txt");
+        create_index("test_hashes.txt", index_path, 100).expect("Failed to create index");
+        let mut pc = PasswordChecker::new("test_hashes.txt",100);
         
         pc.load_index(index_path).expect("Failed to load test vector");
-        assert_eq!(9001, pc.check_password_exists("password"));
-        assert_eq!(0, pc.check_password_exists("Password"));
-        assert_eq!(1111, pc.check_password_exists("abc123"));
+        assert_eq!(9001, pc.check_password_count("password"));
+        assert_eq!(0, pc.check_password_count("Password"));
+        assert_eq!(1111, pc.check_password_count("abc123"));
     }
 
     #[test]
@@ -208,99 +205,19 @@ mod tests {
         fs::write(hash_path, data).expect("Unable to write test hash file");
 
         let index_path = "/tmp/index.txt";
-        create_index(hash_path, index_path).expect("Failed to create index");
-        let mut pc = PasswordChecker::new(hash_path);
+        create_index(hash_path, index_path,100).expect("Failed to create index");
+        let mut pc = PasswordChecker::new(hash_path,100);
         
         pc.load_index(index_path).expect("Failed to load test vector");
 
         for (key, value) in &pc.hash_pos_map {
             println!("{}:{}", key, value);
         }
-        assert_eq!(1, pc.check_hash_exists("0"));
-        assert_eq!(2, pc.check_hash_exists("1"));
-        assert_eq!(102, pc.check_hash_exists(&format!("{:X}", 101)));
-        assert_eq!(1002, pc.check_hash_exists(&format!("{:X}", 1001)));
-        assert_eq!(1003, pc.check_hash_exists(&format!("{:X}", 1002)));
+        assert_eq!(1, pc.check_hash_count("0"));
+        assert_eq!(2, pc.check_hash_count("1"));
+        assert_eq!(102, pc.check_hash_count(&format!("{:X}", 101)));
+        assert_eq!(1002, pc.check_hash_count(&format!("{:X}", 1001)));
+        assert_eq!(1003, pc.check_hash_count(&format!("{:X}", 1002)));
+        assert_eq!(0, pc.check_hash_count(&format!("{:X}", 1003)));
     }
-
-    // #[test]
-    // fn store_hash_two_char() {
-    //     let mut trie = Trie::new();
-    //     trie.store_hash("21");
-    //     assert!(trie.root.children.get(&2u8).as_ref().unwrap().children.get(&1u8).is_some());
-    // }
-
-    // #[test]
-    // fn store_hash_two_hashes() {
-    //     let mut trie = Trie::new();
-    //     trie.store_hash("21");
-    //     trie.store_hash("12");
-    //     assert!(trie.root.children.get(&1u8).as_ref().unwrap().children.get(&2u8).is_some());
-    //     assert!(trie.root.children.get(&2u8).as_ref().unwrap().children.get(&1u8).is_some());
-    // }
-
-    // #[test]
-    // fn store_hash_full_hash() {
-    //     let mut trie = Trie::new();
-    //     trie.store_hash("5BAA61E4C9B93F3F0682250B6CF8331B7EE68FD8");
-    //     assert!(trie.root.children.get(&5u8).as_ref().unwrap().
-    //                       children.get(&11u8).as_ref().unwrap(). // B
-    //                       children.get(&10u8).as_ref().unwrap(). // A
-    //                       children.get(&10u8).as_ref().unwrap(). // A
-    //                       children.get(&6u8).as_ref().unwrap().
-    //                       children.get(&1u8).as_ref().unwrap().
-    //                       children.get(&14u8).as_ref().unwrap(). // E
-    //                       children.get(&4u8).as_ref().unwrap().
-    //                       children.get(&12u8).as_ref().unwrap(). // C
-    //                       children.get(&9u8).as_ref().unwrap().
-    //                       children.get(&11u8).as_ref().unwrap(). // B
-    //                       children.get(&9u8).as_ref().unwrap().
-    //                       children.get(&3u8).as_ref().unwrap().
-    //                       children.get(&15u8).as_ref().unwrap(). // F
-    //                       children.get(&3u8).as_ref().unwrap().
-    //                       children.get(&15u8).as_ref().unwrap(). // F
-    //                       children.get(&0u8).as_ref().unwrap().
-    //                       children.get(&6u8).as_ref().unwrap().
-    //                       children.get(&8u8).as_ref().unwrap().
-    //                       children.get(&2u8).as_ref().unwrap().
-    //                       children.get(&2u8).as_ref().unwrap().
-    //                       children.get(&5u8).as_ref().unwrap().
-    //                       children.get(&0u8).as_ref().unwrap().
-    //                       children.get(&11u8).as_ref().unwrap(). // B
-    //                       children.get(&6u8).as_ref().unwrap().
-    //                       children.get(&12u8).as_ref().unwrap(). // C
-    //                       children.get(&15u8).as_ref().unwrap(). // F
-    //                       children.get(&8u8).as_ref().unwrap().
-    //                       children.get(&3u8).as_ref().unwrap().
-    //                       children.get(&3u8).as_ref().unwrap().
-    //                       children.get(&1u8).as_ref().unwrap().
-    //                       children.get(&11u8).as_ref().unwrap(). // B
-    //                       children.get(&7u8).as_ref().unwrap().
-    //                       children.get(&14u8).as_ref().unwrap(). // E
-    //                       children.get(&14u8).as_ref().unwrap(). // E
-    //                       children.get(&6u8).as_ref().unwrap().
-    //                       children.get(&8u8).as_ref().unwrap().
-    //                       children.get(&15u8).as_ref().unwrap(). // F
-    //                       children.get(&13u8).as_ref().unwrap(). // D
-    //                       children.get(&8u8).is_some());
-    // }   
-
-    // #[test]
-    // fn check_hash_exists() {
-    //     let mut trie = Trie::new();
-    //     trie.store_hash("21");
-    //     assert!(trie.check_hash_exists("21"));
-    //     assert!(!trie.check_hash_exists("12"));
-    // }
-
-    // #[test]
-    // fn check_password_exists() {
-    //     let mut trie = Trie::new();
-    //     trie.store_hash("5BAA61E4C9B93F3F0682250B6CF8331B7EE68FD8");
-    //     assert!(trie.check_password_exists("password"));
-    //     assert!(!trie.check_password_exists("Password"));
-    // }
-
-
-
 }
